@@ -1782,4 +1782,86 @@ describe("vercelAI", () => {
     await expect(integration.flush()).resolves.toBeUndefined();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("records the abort reason from onAbort", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 201 }));
+    const integration = vercelAI({
+      apiKey: "key",
+      projectId: "10000000-0000-0000-0000-000000000001",
+      fetch: fetchMock as typeof fetch,
+    });
+
+    integration.onStepStart?.({
+      callId: "call-1",
+      provider: "openai",
+      modelId: "gpt-4o",
+      stepNumber: 0,
+      messages: [{ role: "user", content: "hi" }],
+    } as never);
+    await integration.onAbort?.({ reason: new Error("user stop") } as never);
+    await integration.flush();
+
+    expect(jsonBody(fetchMock.mock.calls[0]).trace.error).toBe(
+      "AI SDK run aborted: user stop",
+    );
+  });
+
+  it("still sends a trace from fail() when no run started", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 201 }));
+    const integration = vercelAI({
+      apiKey: "key",
+      projectId: "10000000-0000-0000-0000-000000000001",
+      fetch: fetchMock as typeof fetch,
+    });
+
+    await integration.fail(new Error("threw before any event"));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("records the real error from onStepError on the open v7 step", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 201 }));
+    const integration = vercelAI({
+      apiKey: "key",
+      projectId: "10000000-0000-0000-0000-000000000001",
+      fetch: fetchMock as typeof fetch,
+    });
+
+    integration.onStepStart?.({
+      callId: "call-1",
+      provider: "openai",
+      modelId: "gpt-4o",
+      stepNumber: 0,
+      messages: [{ role: "user", content: "hi" }],
+    } as never);
+    integration.onStepError?.({ error: new Error("step exploded") } as never);
+    await integration.onEnd?.({ finishReason: "tool-calls" } as never);
+    await integration.flush();
+
+    const { trace } = jsonBody(fetchMock.mock.calls[0]);
+    expect(trace.error).toContain("step exploded");
+    expect(trace.spans[0].error).toContain("step exploded");
+  });
+
+  it("delivers immediately when fail() arrives after the run ended", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 201 }));
+    const integration = vercelAI({
+      apiKey: "key",
+      projectId: "10000000-0000-0000-0000-000000000001",
+      fetch: fetchMock as typeof fetch,
+    });
+
+    integration.onStepStart?.({
+      callId: "call-1",
+      provider: "openai",
+      modelId: "gpt-4o",
+      stepNumber: 0,
+      messages: [{ role: "user", content: "hi" }],
+    } as never);
+    await integration.onError?.({ error: new Error("first") } as never);
+    await integration.fail(new Error("second"));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(jsonBody(fetchMock.mock.calls[0]).trace.error).toContain("second");
+  });
 });

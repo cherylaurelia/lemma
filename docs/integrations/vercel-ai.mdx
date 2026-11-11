@@ -110,7 +110,7 @@ try {
 
 ## Streaming
 
-Use the same per-operation integration with `streamText`. Call `flush()` after the stream finishes to send the trace. Call `fail(error)` if the call throws before a terminal callback.
+Use the same per-operation integration with `streamText`. Call `flush()` after the stream finishes to send the trace. On AI SDK v7, provider errors and aborts during the stream are recorded automatically. Call `fail(error)` if the call throws before a terminal callback.
 
 ```typescript
 import { streamText } from "ai";
@@ -171,7 +171,7 @@ Prompts, tool inputs, tool outputs, model output, and error messages are always 
 
 | Method | When to use |
 | --- | --- |
-| `fail(error)` | The AI SDK call threw or was aborted before a terminal telemetry callback |
+| `fail(error)` | The AI SDK call threw before a terminal telemetry callback. On AI SDK v7 failures already recorded by telemetry are not sent twice |
 | `flush()` | Send the integration’s completed traces and await ingest delivery |
 | `shutdown()` | Flush and clear state in workers / serverless teardown |
 
