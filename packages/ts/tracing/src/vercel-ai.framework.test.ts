@@ -49,7 +49,9 @@ describe("vercelAI through real AI SDK", () => {
       user_id: "user-1",
     });
     expect(
-      trace.spans.some((span: { type: string }) => span.type === "generation"),
-    ).toBe(true);
+      trace.spans.filter(
+        (span: { type: string }) => span.type === "generation",
+      ),
+    ).toHaveLength(1);
   });
 });

@@ -1335,6 +1335,8 @@ export function vercelAI(
     },
 
     onStepFinish(event) {
+      // v7 fires this deprecated alias after onStepEnd for the same step.
+      if (sawV7StepZero) return;
       if (phase !== "active" && phase !== "ending") return;
       recordedV6Step = true;
       const key = `step:${event.stepNumber}`;
