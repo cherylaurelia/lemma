@@ -40,6 +40,7 @@ type VercelAIModelCallEndEvent = {
 };
 
 type VercelAIEndEvent = {
+  finishReason?: unknown;
   text?: string;
   content?: ReadonlyArray<unknown>;
   functionId?: string;
@@ -93,6 +94,7 @@ type VercelAIStepStartEvent = {
 };
 
 type VercelAIStepEndEvent = {
+  finishReason?: unknown;
   callId: string;
   stepNumber: number;
   model: VercelAIV6ModelInfo;
@@ -190,6 +192,8 @@ type VercelAIV6ToolCallFinishEvent = {
     }
 );
 
+type VercelAIErrorEvent = { error: unknown };
+
 type VercelAITelemetryHandlers = {
   onLanguageModelCallStart?: (
     event: VercelAIModelCallStartEvent,
@@ -211,6 +215,9 @@ type VercelAITelemetryHandlers = {
     event: VercelAIStepStartEvent | VercelAIV6StepStartEvent,
   ) => MaybePromise<void>;
   onStepEnd?: (event: VercelAIStepEndEvent) => MaybePromise<void>;
+  onStepError?: (event: VercelAIErrorEvent) => MaybePromise<void>;
+  onError?: (event: unknown) => MaybePromise<void>;
+  onAbort?: () => MaybePromise<void>;
   onStepFinish?: (event: VercelAIV6StepFinishEvent) => MaybePromise<void>;
   onFinish?: (event: VercelAIV6FinishEvent) => MaybePromise<void>;
   onEnd?: (event: VercelAIEndEvent) => MaybePromise<void>;
@@ -236,6 +243,10 @@ export type VercelAITelemetryIntegration = {
   onStart?: (event: object) => MaybePromise<void>;
   onStepStart?: (event: object) => MaybePromise<void>;
   onStepEnd?: (event: object) => MaybePromise<void>;
+  onStepError?: (event: object) => MaybePromise<void>;
+  /** AI SDK types this event as `unknown`, so `object` would not be assignable. */
+  onError?: (event: unknown) => MaybePromise<void>;
+  onAbort?: (event: object) => MaybePromise<void>;
   onStepFinish?: (event: object) => MaybePromise<void>;
   onFinish?: (event: object) => MaybePromise<void>;
   onEnd?: (event: object) => MaybePromise<void>;
@@ -317,7 +328,12 @@ type ResolvedTrace = {
 type TerminalEvent =
   | VercelAIEndEvent
   | VercelAIV6FinishEvent
-  | { error?: unknown; text?: string; content?: ReadonlyArray<unknown> };
+  | {
+      error?: unknown;
+      text?: string;
+      content?: ReadonlyArray<unknown>;
+      finishReason?: unknown;
+    };
 
 const CONCURRENT_REUSE_ERROR =
   "vercelAI() is already tracing a run. Create a new vercelAI() integration per concurrent AI SDK operation.";
@@ -610,6 +626,13 @@ function v6Output(event: VercelAIV6StepFinishEvent | VercelAIV6FinishEvent) {
   return structuredAssistantOutput(event.text, event.content);
 }
 
+/** AI SDK v7 reports a provider `error` stream chunk only as this finish reason. */
+function terminalFinishError(event: object): string | undefined {
+  return "finishReason" in event && event.finishReason === "error"
+    ? "AI SDK stream finished with finishReason: error"
+    : undefined;
+}
+
 function endOutput(event: TerminalEvent) {
   return structuredAssistantOutput(event.text, event.content);
 }
@@ -871,7 +894,7 @@ export function vercelAI(
     const eventError =
       "error" in event && event.error != null
         ? describeError(event.error)
-        : undefined;
+        : terminalFinishError(event);
     if (eventError && !runError) {
       runError = eventError;
     }
@@ -1074,6 +1097,14 @@ export function vercelAI(
     return { event, startedAt, handle, key };
   }
 
+  function failOpenV7Steps(message: string) {
+    runError ??= message;
+    for (const { handle } of v7Steps.values()) {
+      handle.end({ status: "ERROR", error: runError });
+    }
+    v7Steps.clear();
+  }
+
   function endV7Generation(event: VercelAIStepEndEvent) {
     const key = v7StepKey(event.callId, event.stepNumber);
     const stored = v7Steps.get(key);
@@ -1088,7 +1119,9 @@ export function vercelAI(
     );
     const output = structuredAssistantOutput(event.text, event.content);
     const generationError =
-      event.error != null ? describeError(event.error) : undefined;
+      event.error != null
+        ? describeError(event.error)
+        : terminalFinishError(event);
 
     for (const toolCall of event.toolCalls ?? []) {
       if (toolCall.toolCallId) {
@@ -1334,7 +1367,27 @@ export function vercelAI(
       endV7Generation(event);
     },
 
+    onStepError(event) {
+      failOpenV7Steps(describeError(event.error));
+    },
+
+    async onError(event) {
+      if (phase === "idle") return;
+      const error =
+        event && typeof event === "object" && "error" in event
+          ? event.error
+          : event;
+      failOpenV7Steps(describeError(error));
+      if (phase === "active") await endOwnedTrace({ error });
+    },
+
+    async onAbort() {
+      await integration.onError?.({ error: "AI SDK run aborted" });
+    },
+
     onStepFinish(event) {
+      // v7 fires this deprecated alias after onStepEnd for the same step.
+      if (sawV7StepZero) return;
       if (phase !== "active" && phase !== "ending") return;
       recordedV6Step = true;
       const key = `step:${event.stepNumber}`;
@@ -1365,6 +1418,8 @@ export function vercelAI(
         if (!hasExplicitEndableTrace()) return;
         beginActivity();
       }
+      // Older v7 releases end the run with no error event when a later step throws.
+      if (v7Steps.size > 0) failOpenV7Steps("AI SDK run ended before a step finished");
       await endOwnedTrace(event);
     },
 
@@ -1435,6 +1490,7 @@ export function vercelAI(
         // Best-effort: apply before the in-flight terminal send reads error state.
         endingTrace?.fail(message);
         endingTrace?.output(undefined);
+        if (deliverOwnedTrace) await deliverOwnedTrace();
         return;
       }
       if (phase === "idle") {
